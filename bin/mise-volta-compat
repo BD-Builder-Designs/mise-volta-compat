@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="dev"
+KNOWN_KEYS="node npm yarn pnpm"
+
+cmd_version() {
+  echo "$VERSION"
+}
+
+cmd_help() {
+  echo "mise-volta-compat v${VERSION}"
+  echo ""
+  echo "Usage: mise-volta-compat <command>"
+  echo ""
+  echo "Commands:"
+  echo "  check     Check for unmigrated volta config (used as enter hook)"
+  echo "  migrate   Convert volta config in package.json to .mise.toml"
+  echo "  version   Print version"
+}
+
+cmd_check() {
+  # Check for unmigrated volta config (needs jq + package.json)
+  if command -v jq >/dev/null 2>&1 && [[ -f package.json ]]; then
+    if jq -e '.volta' package.json >/dev/null 2>&1 && [[ ! -f .mise.toml ]]; then
+      echo "⚡ This project uses Volta config. Run 'mise-volta-compat migrate' to convert to .mise.toml"
+    fi
+  fi
+
+  # Check for unnecessary MISE_ARCH override (reads node version from .mise.toml)
+  if [[ -f .mise.toml ]] && grep -qF 'MISE_ARCH' .mise.toml 2>/dev/null; then
+    local node_version node_major
+    node_version=$(grep -E '^node' .mise.toml | head -1 | sed 's/[^"]*"\([^"]*\)".*/\1/')
+    if [[ -n "$node_version" ]]; then
+      node_major="${node_version%%.*}"
+      if [[ "$node_major" -ge 16 ]]; then
+        echo "⚡ .mise.toml has MISE_ARCH=x86_64 but Node ${node_version} has native ARM64 builds. The override can be removed."
+      fi
+    fi
+  fi
+
+  exit 0
+}
+
+cmd_migrate() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required — run 'mise install' or install jq manually" >&2
+    exit 1
+  fi
+
+  if [[ ! -f package.json ]]; then
+    echo "No package.json found" >&2
+    exit 1
+  fi
+
+  local volta
+  volta=$(jq -r '.volta // empty' package.json)
+  if [[ -z "$volta" ]]; then
+    echo "No volta config in package.json"
+    exit 0
+  fi
+
+  local key_count
+  key_count=$(jq -r '.volta | keys | length' package.json)
+  if [[ "$key_count" -eq 0 ]]; then
+    echo "No volta config in package.json"
+    exit 0
+  fi
+
+  if [[ -f .mise.toml ]]; then
+    echo ".mise.toml already exists — skipping"
+    exit 0
+  fi
+
+  # Build .mise.toml atomically
+  local tmp_toml needs_arch_override=false
+  tmp_toml=$(mktemp)
+
+  # Check if Node < 16 needs x86_64 override for Apple Silicon
+  local node_version
+  node_version=$(jq -r '.volta.node // empty' package.json)
+  if [[ -n "$node_version" ]]; then
+    local node_major
+    node_major="${node_version%%.*}"
+    if [[ "$node_major" -lt 16 ]]; then
+      needs_arch_override=true
+    fi
+  fi
+
+  if [[ "$needs_arch_override" == "true" ]]; then
+    echo "[env]" > "$tmp_toml"
+    echo 'MISE_ARCH = "x86_64"' >> "$tmp_toml"
+    echo "" >> "$tmp_toml"
+    echo "Warning: Node ${node_version} does not have native ARM64 builds. Added MISE_ARCH=x86_64 override." >&2
+  fi
+
+  echo "[tools]" >> "$tmp_toml"
+  local key version
+  while IFS= read -r key; do
+    version=$(jq -r ".volta.\"${key}\"" package.json)
+
+    # Warn on unrecognized keys
+    local known=false
+    for k in $KNOWN_KEYS; do
+      if [[ "$k" == "$key" ]]; then known=true; break; fi
+    done
+    if [[ "$known" == "false" ]]; then
+      echo "Warning: unrecognized volta key '${key}' — writing as-is to .mise.toml" >&2
+    fi
+
+    echo "${key} = \"${version}\"" >> "$tmp_toml"
+  done < <(jq -r '.volta | keys[]' package.json)
+  mv "$tmp_toml" .mise.toml
+
+  echo "Created .mise.toml from volta config"
+  echo "Review the changes, then commit:"
+  echo "  git add .mise.toml && git commit -m 'chore: add mise config from volta pins'"
+}
+
+case "${1:-}" in
+  check)   cmd_check ;;
+  migrate) cmd_migrate ;;
+  version) cmd_version ;;
+  *)       cmd_help; exit 1 ;;
+esac
