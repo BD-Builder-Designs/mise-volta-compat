@@ -24,7 +24,7 @@ jobs:
       - name: Create platform tarballs
         run: |
           chmod +x bin/mise-volta-compat
-          platforms=("linux-x86_64" "linux-aarch64" "darwin-x86_64" "darwin-arm64")
+          platforms=("linux-x64" "linux-arm64" "macos-x64" "macos-arm64")
           for platform in "${platforms[@]}"; do
             tar -czf "mise-volta-compat-${GITHUB_REF_NAME}-${platform}.tar.gz" -C bin mise-volta-compat
           done
